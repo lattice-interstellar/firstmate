@@ -90,6 +90,7 @@ tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-tri
 tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection, read-only remediation suppression, and spawn/brief isolation tests
 tests/fm-brief.test.sh                    # fm-brief.sh bash -n parse regression guard (issue #166) and clean no-mistakes/direct-PR/local-only brief generation tests
 tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
+tests/fm-home-resolution.test.sh          # FM_HOME-authoritative operational reads: mode/yolo, harness, and guard supervision resolve through FM_HOME with a foreign executing bin, pinning the no-split-brain invariant
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, and secondmate exemption
 tests/fm-spawn-lease.test.sh              # leased crew/scout worktree acquisition: treehouse get --lease --lease-holder token, worktree path captured from stdout, lease_holder= recorded in meta, pane cd-poll verified; bare-get fallback records no lease_holder=; abnormal exit before meta returns the lease
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests

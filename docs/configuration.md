@@ -93,6 +93,8 @@ Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled char
 
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
+`FM_HOME` is authoritative for every operational, home-derived read - those directories plus the mode/yolo, harness, and guard-supervision lookups the helper scripts perform - while `FM_ROOT` is reserved for primary-repo reads such as the worktree-tangle guard and the primary default-branch HEAD.
+`fm-spawn.sh` and `fm-teardown.sh` export `FM_HOME` after resolving it, so every helper they spawn inherits the same operational home instead of re-deriving it from the executing script's own location.
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories for tests and specialized harness setup.
