@@ -21,6 +21,13 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# Cross-home lease guard (data/fmfork-fix-plan-r4 PR-B): before returning a
+# crew/scout worktree, if the meta recorded a lease_holder= token, teardown reads
+# the worktree's live holder via `treehouse status` and REFUSES the return when a
+# different holder owns it, so this home never tears down a worktree another
+# firstmate home is live in. An absent lease_holder= (pre-lease task or bare-get
+# fallback) or an unheld worktree skips the guard. The refusal is not bypassed by
+# --force, which discards only THIS task's work.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
@@ -80,6 +87,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -95,6 +104,11 @@ if [ "$BACKEND" = orca ]; then
   [ -n "$T_ORCA" ] && T=$T_ORCA
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
+# lease_holder= is the treehouse lease owner token recorded by fm-spawn for a
+# leased crew/scout worktree. Empty for tasks spawned before leasing landed or on
+# a treehouse without --lease; that "unknown holder" case falls back to today's
+# behavior (no cross-home refusal). See the cross-home guard below.
+LEASE_HOLDER=$(grep '^lease_holder=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
@@ -1008,6 +1022,27 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  # Cross-home guard (data/fmfork-fix-plan-r4 PR-B): if this task's meta recorded a
+  # lease holder, read the worktree's LIVE holder from treehouse and refuse to
+  # touch it when another home holds it. A shared pool (same-origin clones in two
+  # homes) plus a stale or foreign meta could otherwise point us at a worktree
+  # another firstmate is live in; the branch reset and treehouse return below
+  # would hard-reset that home's work. This runs FIRST, before any mutation of the
+  # worktree, so a foreign-held worktree is left completely untouched.
+  # A missing lease_holder= (pre-lease task, or bare-get fallback) or a worktree
+  # treehouse reports as unheld skips the guard and falls back to prior behavior.
+  # This refusal is intentionally not bypassed by --force: --force discards THIS
+  # task's work, never another home's.
+  if [ -n "$LEASE_HOLDER" ]; then
+    live_holder=$(fm_treehouse_status_holder "$WT" || true)
+    if [ -n "$live_holder" ] && [ "$live_holder" != "$LEASE_HOLDER" ]; then
+      echo "REFUSED: worktree $WT is leased by a different holder; not returning it." >&2
+      echo "  recorded lease holder (task $ID): $LEASE_HOLDER" >&2
+      echo "  live treehouse lease holder:      $live_holder" >&2
+      echo "  Refusing so this home never tears down a worktree another firstmate home holds." >&2
+      exit 1
+    fi
+  fi
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then

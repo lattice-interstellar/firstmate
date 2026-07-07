@@ -394,6 +394,40 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+# Override fakebin/treehouse with a lease-holder-aware mock for the cross-home
+# guard tests. `treehouse status` reports the worktree at FM_FAKE_TH_WT as held by
+# FM_FAKE_TH_HOLDER (both env-driven per test), matching treehouse's real
+# "... (held by <holder>)" line ending; `treehouse return --force <wt>` records the
+# returned path to FM_FAKE_TH_RETURN_LOG so a test can assert whether the return
+# ran. Args: case_dir
+add_holder_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    if [ -n "${FM_FAKE_TH_HOLDER:-}" ] && [ -n "${FM_FAKE_TH_WT:-}" ]; then
+      printf 'busy  %s  fm/task-x1  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
+    fi
+    exit 0
+    ;;
+  return)
+    shift
+    for a in "$@"; do
+      case "$a" in
+        --force) ;;
+        *) [ -n "${FM_FAKE_TH_RETURN_LOG:-}" ] && printf '%s\n' "$a" >> "$FM_FAKE_TH_RETURN_LOG" ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -1003,7 +1037,98 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+# --- PR-B cross-home lease-holder guard -------------------------------------
+#
+# fm-teardown reads the worktree's live treehouse lease holder and refuses to
+# return it when a different home holds it, so one home never tears down another
+# home's live worktree. A matching holder returns as normal; a missing
+# lease_holder= (task spawned before leasing) falls back to prior behavior.
+
+test_lease_holder_match_allows_return() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-match)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_holder_treehouse "$case_dir"
+
+  set +e
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:$case_dir:task-x1" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "lease-holder-match: teardown should return when the live holder matches"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-match: teardown printed a REFUSED line"
+  assert_grep "$case_dir/wt" "$case_dir/return.log" \
+    "lease-holder-match: treehouse return was not called for the worktree"
+  pass "matching lease holder returns the worktree (guard allows own-home teardown)"
+}
+
+test_lease_holder_mismatch_refuses_return() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-mismatch)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  # Landed work, so ONLY the foreign lease holder can cause a refusal here.
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_holder_treehouse "$case_dir"
+
+  set +e
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:/some/other/home:other-task" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lease-holder-mismatch: teardown should refuse a foreign-held worktree"
+  grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-mismatch: no REFUSED line in stderr"
+  grep -q "leased by a different holder" "$case_dir/stderr" \
+    || fail "lease-holder-mismatch: refusal did not name the holder mismatch"
+  assert_absent "$case_dir/return.log" \
+    "lease-holder-mismatch: treehouse return must not be called for a foreign-held worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "lease-holder-mismatch: meta must be preserved on refusal"
+  pass "foreign lease holder refuses the return with no treehouse return call (cross-home guard)"
+}
+
+test_missing_lease_holder_falls_back_and_returns() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-absent)
+  write_meta "$case_dir" no-mistakes ship
+  # No lease_holder= line: a task spawned before leasing landed.
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_holder_treehouse "$case_dir"
+
+  ! grep -q '^lease_holder=' "$case_dir/state/task-x1.meta" \
+    || fail "lease-holder-absent: test setup bug, meta unexpectedly has a lease_holder= line"
+
+  set +e
+  # treehouse reports a foreign holder, but an absent lease_holder= means unknown
+  # holder -> fall back to prior behavior and return anyway.
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:/some/other/home:other-task" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "lease-holder-absent: teardown should fall back and return when no lease_holder was recorded"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-absent: teardown printed a REFUSED line"
+  assert_grep "$case_dir/wt" "$case_dir/return.log" \
+    "lease-holder-absent: treehouse return was not called under the backward-compat fallback"
+  pass "missing lease_holder falls back to prior behavior and tears down (backward compatible)"
+}
+
 test_local_only_fork_remote_allows
+test_lease_holder_match_allows_return
+test_lease_holder_mismatch_refuses_return
+test_missing_lease_holder_falls_back_and_returns
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses

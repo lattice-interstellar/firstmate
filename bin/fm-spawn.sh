@@ -70,6 +70,14 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+# Ship/scout worktrees (non-Orca) are acquired with
+#   treehouse get --lease --lease-holder "fm:<abs-FM_HOME>:<id>"
+# capturing the worktree path from stdout, and the owner token is recorded as
+# lease_holder= in the task meta so fm-teardown can refuse to return a worktree
+# another home holds (data/fmfork-fix-plan-r4 PR-B; bin/fm-treehouse-lib.sh). When
+# the installed treehouse lacks --lease (bootstrap flags that as an upgrade), the
+# spawn falls back to the bare `treehouse get` + pane-cwd poll and records no
+# lease_holder=.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -92,6 +100,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -803,27 +813,53 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
+LEASE_HOLDER=
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$T" 'treehouse get'
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$T" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+  if fm_treehouse_supports_lease; then
+    # Primary path: durably lease the worktree from THIS process and capture its
+    # path from stdout, then move the pane into it. The lease-holder token encodes
+    # the owning home + task so teardown can refuse to return a worktree another
+    # home holds, and leasing stops a pool shared by two same-origin homes from
+    # handing the same worktree to both (data/fmfork-fix-plan-r4 PR-B;
+    # bin/fm-treehouse-lib.sh owns the exact flags).
+    LEASE_HOLDER=$(fm_treehouse_owner_token "$FM_HOME" "$ID")
+    WT=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$LEASE_HOLDER" ) || {
+      echo "error: treehouse get --lease failed to lease a worktree for $ID; inspect the pool" >&2
+      exit 1
+    }
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get --lease did not report a worktree path for $ID" >&2
+      exit 1
     fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
-  fi
+    validate_spawn_worktree "treehouse get --lease" "$T"
+    # The lease was acquired out-of-pane, so move the pane into the worktree the
+    # agent will work in (the bare-get fallback below relies on treehouse's own cd).
+    spawn_send_text_line "$T" "cd $(shell_quote "$WT")"
+  else
+    # Fallback for a treehouse without --lease (bootstrap flags a missing --lease
+    # as an upgrade). Run the bare get in the pane and poll the pane cwd, exactly
+    # as before leasing; no lease is held, so no lease_holder= is recorded.
+    spawn_send_text_line "$T" 'treehouse get'
 
-  validate_spawn_worktree "treehouse get" "$T"
+    # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+    # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
+    # prefix would otherwise make the pane's OS-level cwd read differ from
+    # PROJ_ABS on the very first poll, before the pane has actually moved.
+    for _ in $(seq 1 60); do
+      p=$(spawn_current_path "$T" || true)
+      if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+        WT="$p"
+        break
+      fi
+      sleep 1
+    done
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+      exit 1
+    fi
+
+    validate_spawn_worktree "treehouse get" "$T"
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -958,6 +994,11 @@ META_WINDOW=$T
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
+  # lease_holder= records the treehouse lease owner token for a leased crew/scout
+  # worktree; absent when leasing was unavailable (bare-get fallback) or the kind
+  # never leases (secondmate/orca). Teardown treats absent as unknown holder and
+  # falls back to its pre-lease behavior (data/fmfork-fix-plan-r4 PR-B).
+  [ -z "$LEASE_HOLDER" ] || echo "lease_holder=$LEASE_HOLDER"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
