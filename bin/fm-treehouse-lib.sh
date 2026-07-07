@@ -36,11 +36,13 @@ fm_treehouse_owner_token() {  # <home> <id>
 # status` reports for the worktree at <worktree-path>, or nothing when that
 # worktree is absent from the pool or reports no holder. treehouse prints one
 # line per worktree; a leased line ends with "  (held by <holder>)" (the
-# treehouse v2.0.0 status format string is `%-4s  %s%s  %s  (held by %s)`). The
-# path is matched both as given and canonicalized so a symlinked invocation path
-# still lines up with treehouse's physically-resolved output.
+# treehouse v2.0.0 status format string is `%-4s  %s%s  %s  (held by %s)`). Each
+# line is split into whitespace-delimited fields and the worktree path is matched
+# as a whole field, both as given and canonicalized, so a path like .../wt-2
+# never matches a .../wt-20 line and a symlinked invocation path still lines up
+# with treehouse's physically-resolved output.
 fm_treehouse_status_holder() {  # <worktree-path>
-  local wt=$1 wt_real="" line rest holder matched
+  local wt=$1 wt_real="" line rest holder matched field field_real
   wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || wt_real=""
   while IFS= read -r line; do
     case "$line" in
@@ -48,10 +50,17 @@ fm_treehouse_status_holder() {  # <worktree-path>
       *) continue ;;
     esac
     matched=0
-    case "$line" in *"$wt"*) matched=1 ;; esac
-    if [ "$matched" -eq 0 ] && [ -n "$wt_real" ]; then
-      case "$line" in *"$wt_real"*) matched=1 ;; esac
-    fi
+    for field in $line; do
+      if [ "$field" = "$wt" ] || { [ -n "$wt_real" ] && [ "$field" = "$wt_real" ]; }; then
+        matched=1
+        break
+      fi
+      field_real=$(cd "$field" 2>/dev/null && pwd -P) || field_real=""
+      if [ -n "$field_real" ] && { [ "$field_real" = "$wt" ] || [ "$field_real" = "$wt_real" ]; }; then
+        matched=1
+        break
+      fi
+    done
     [ "$matched" -eq 1 ] || continue
     rest=${line##*"(held by "}
     holder=${rest%")"}

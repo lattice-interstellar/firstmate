@@ -428,6 +428,42 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+# Override fakebin/treehouse to reproduce the path-prefix collision: `treehouse
+# status` reports two worktrees whose paths are prefixes of one another - a
+# foreign-held "<wt>-2" line FIRST, then the queried worktree's own line held by
+# FM_FAKE_TH_HOLDER. A substring-matching holder parse would read the foreign
+# "<wt>-2" holder for a "<wt>" query and falsely refuse; a field-bounded parse
+# reads the own holder. `treehouse return --force <wt>` records to
+# FM_FAKE_TH_RETURN_LOG as in add_holder_treehouse. Args: case_dir
+add_collision_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    if [ -n "${FM_FAKE_TH_HOLDER:-}" ] && [ -n "${FM_FAKE_TH_WT:-}" ]; then
+      printf 'busy  %s-2  fm/task-y2  (held by %s)\n' "$FM_FAKE_TH_WT" "fm:/some/other/home:other-task"
+      printf 'busy  %s  fm/task-x1  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
+    fi
+    exit 0
+    ;;
+  return)
+    shift
+    for a in "$@"; do
+      case "$a" in
+        --force) ;;
+        *) [ -n "${FM_FAKE_TH_RETURN_LOG:-}" ] && printf '%s\n' "$a" >> "$FM_FAKE_TH_RETURN_LOG" ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -1125,9 +1161,36 @@ test_missing_lease_holder_falls_back_and_returns() {
   pass "missing lease_holder falls back to prior behavior and tears down (backward compatible)"
 }
 
+test_lease_holder_prefix_collision_reads_own_holder() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-collision)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_collision_treehouse "$case_dir"
+
+  set +e
+  # status lists a foreign-held "<wt>-2" line before this task's own "<wt>" line;
+  # the guard must read its own holder and not the "<wt>-2" holder.
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:$case_dir:task-x1" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "lease-holder-collision: teardown should read its own holder and return"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-collision: teardown falsely refused on a prefix-collision status line"
+  assert_grep "$case_dir/wt" "$case_dir/return.log" \
+    "lease-holder-collision: treehouse return was not called for the worktree"
+  pass "prefix-collision status line reads the queried worktree's own holder (field-bounded match)"
+}
+
 test_local_only_fork_remote_allows
 test_lease_holder_match_allows_return
 test_lease_holder_mismatch_refuses_return
+test_lease_holder_prefix_collision_reads_own_holder
 test_missing_lease_holder_falls_back_and_returns
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
