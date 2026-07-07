@@ -21,6 +21,18 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# Cross-home lease guard (data/fmfork-fix-plan-r4 PR-B): before returning a
+# crew/scout worktree, if the meta recorded a lease_holder= token, teardown
+# confirms the worktree's live lease state via `treehouse status` and FAILS
+# CLOSED - it proceeds only when the worktree row is found AND either its holder
+# matches our token or the row is explicitly unheld; a different holder, a missing
+# row, or a status error all REFUSE. This is because `treehouse return --force`
+# releases even a foreign-held lease client-side, so an unconfirmed state must
+# never fall through to it. An absent lease_holder= (pre-lease task or bare-get
+# fallback) keeps the prior behavior. The refusal is not bypassed by --force,
+# which discards only THIS task's work. The check runs before any worktree
+# mutation and again immediately before the return (TOCTOU); see
+# lease_holder_guard_or_refuse.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
@@ -80,6 +92,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -95,6 +109,11 @@ if [ "$BACKEND" = orca ]; then
   [ -n "$T_ORCA" ] && T=$T_ORCA
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
+# lease_holder= is the treehouse lease owner token recorded by fm-spawn for a
+# leased crew/scout worktree. Empty for tasks spawned before leasing landed or on
+# a treehouse without --lease; that "unknown holder" case falls back to today's
+# behavior (no cross-home refusal). See the cross-home guard below.
+LEASE_HOLDER=$(grep '^lease_holder=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
@@ -555,6 +574,50 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Cross-home lease guard (data/fmfork-fix-plan-r4 PR-B). Runs only when the meta
+# recorded a lease_holder= token; a task spawned before leasing (or on a treehouse
+# without --lease) has no token and keeps the pre-lease behavior. FAILS CLOSED:
+# it refuses (exit 1) unless the worktree's lease state is positively confirmed as
+# ours - held by exactly LEASE_HOLDER, or an explicitly present unheld/available
+# row (the legit edge where the captain manually returned the lease). Any
+# unconfirmed state - held by a DIFFERENT home, row not found, or a treehouse
+# status error - refuses, because `treehouse return --force` would otherwise
+# hard-reset that worktree (enforcement is entirely client-side). The refusal is
+# deliberately not bypassed by --force: --force discards THIS task's work, never
+# another home's. Called twice: once before any worktree mutation so a
+# foreign-held worktree is left untouched, and again immediately before the return
+# to shrink the check-then-act TOCTOU window (treehouse has no holder-scoped
+# return today; a `treehouse return --if-holder <token>` follow-up would close it
+# fully - firstmate backlog).
+lease_holder_guard_or_refuse() {  # <phase-label>
+  local phase=$1 state kind holder
+  [ -n "$LEASE_HOLDER" ] || return 0
+  state=$(fm_treehouse_lease_state "$WT" "$PROJ")
+  kind=${state%%$'\t'*}
+  holder=''
+  [ "$kind" = "$state" ] || holder=${state#*$'\t'}
+  case "$kind" in
+    held)
+      [ "$holder" = "$LEASE_HOLDER" ] && return 0
+      echo "REFUSED: worktree $WT is leased by a different holder; not returning it ($phase)." >&2
+      echo "  recorded lease holder (task $ID): $LEASE_HOLDER" >&2
+      echo "  live treehouse lease holder:      $holder" >&2
+      echo "  Refusing so this home never tears down a worktree another firstmate home holds." >&2
+      exit 1
+      ;;
+    unheld)
+      return 0
+      ;;
+    *)
+      echo "REFUSED: cannot confirm worktree $WT is leased by this home; not returning it ($phase)." >&2
+      echo "  recorded lease holder (task $ID): $LEASE_HOLDER" >&2
+      echo "  treehouse lease state (pool $PROJ): $kind" >&2
+      echo "  Failing closed rather than 'treehouse return --force' a worktree whose lease state is unconfirmed." >&2
+      exit 1
+      ;;
+  esac
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1008,6 +1071,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  # Cross-home lease guard, phase 1: refuse BEFORE any mutation so a worktree held
+  # by another home is left completely untouched (fail-closed; see
+  # lease_holder_guard_or_refuse above). No-op when no lease_holder= was recorded.
+  lease_holder_guard_or_refuse "pre-mutation"
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -1024,6 +1091,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
+  # Cross-home lease guard, phase 2: re-read the holder immediately before the
+  # return to shrink the check-then-act window opened by the branch reset and hook
+  # removal above (another home could have leased this worktree in between).
+  lease_holder_guard_or_refuse "pre-return"
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1

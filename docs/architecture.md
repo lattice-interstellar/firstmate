@@ -68,6 +68,11 @@ cmux's container shape is one workspace per task with one surface, no per-home c
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
+A treehouse pool is keyed by the origin remote URL, so two firstmate homes cloning a same-origin repo share one pool, and a non-leased `treehouse get` could hand the same idle worktree to both.
+`fm-spawn.sh` therefore acquires a crew/scout worktree with `treehouse get --lease --lease-holder fm:<abs-home>:<id>`, which durably reserves the worktree, records the owner token as `lease_holder=` in the task meta, and verifies the pane physically entered the worktree; `fm-teardown.sh` confirms the worktree's live lease state from `treehouse status` and fails closed - it returns the worktree only when it is positively shown held by that token or explicitly unheld, and refuses on a different home's holder, a missing status row, or a status error, because `treehouse return --force` releases a lease client-side and so an unconfirmed state must never fall through to it.
+The shared parse and fail-closed classifier live in `fm-treehouse-lib.sh`; the guard runs before any worktree mutation and again immediately before the return, and `--force` never bypasses it.
+A treehouse without `--lease` (bootstrap flags that as an upgrade) falls back to a bare `treehouse get` with pane-cwd polling and records no `lease_holder=`, which teardown treats as an unknown holder and handles with its pre-lease behavior.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
