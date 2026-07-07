@@ -84,6 +84,14 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# FM_HOME is authoritative for operational home-derived reads (state, data,
+# config, the task meta, and the mode/yolo and guard lookups the helpers do);
+# FM_ROOT is only for primary-repo reads (worktree-tangle guard, git-worktree
+# slot and removal-safety checks that protect the executing repo, the treehouse
+# return cwd for a secondmate home). Export FM_HOME so every helper this script
+# spawns inherits the same operational home explicitly rather than re-deriving it
+# from its own location (data/fmfork-fix-plan-r4 PR-A1 W2).
+export FM_HOME
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh

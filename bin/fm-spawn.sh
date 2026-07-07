@@ -93,6 +93,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# FM_HOME is authoritative for operational home-derived reads (state, data,
+# projects, config, and the mode/yolo and harness lookups the helper scripts do);
+# FM_ROOT is only for primary-repo reads (worktree-tangle guard, primary
+# default-branch HEAD, secondmate-home structural checks). Export FM_HOME so every
+# helper this script spawns inherits the same operational home explicitly rather
+# than re-deriving it from its own location - a set FM_HOME then cannot silently
+# split-brain into the executing bin's home (data/fmfork-fix-plan-r4 PR-A1 W2).
+export FM_HOME
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
