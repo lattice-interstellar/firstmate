@@ -32,17 +32,24 @@ fm_treehouse_owner_token() {  # <home> <id>
   printf 'fm:%s:%s\n' "$home_real" "$id"
 }
 
-# fm_treehouse_status_holder <worktree-path>: echo the lease holder `treehouse
-# status` reports for the worktree at <worktree-path>, or nothing when that
-# worktree is absent from the pool or reports no holder. treehouse prints one
+# fm_treehouse_status_holder <worktree-path> <pool-dir>: echo the lease holder
+# `treehouse status` reports for the worktree at <worktree-path>, or nothing when
+# that worktree is absent from the pool or reports no holder. treehouse resolves
+# the pool from the working directory (same reason spawn cd's into the project and
+# teardown_treehouse_return cd's into cd_dir), so status runs in a subshell from
+# <pool-dir>; when <pool-dir> is empty or not a directory the function returns
+# nothing rather than reading a pool from an arbitrary cwd. treehouse prints one
 # line per worktree; a leased line ends with "  (held by <holder>)" (the
 # treehouse v2.0.0 status format string is `%-4s  %s%s  %s  (held by %s)`). Each
-# line is split into whitespace-delimited fields and the worktree path is matched
-# as a whole field, both as given and canonicalized, so a path like .../wt-2
-# never matches a .../wt-20 line and a symlinked invocation path still lines up
-# with treehouse's physically-resolved output.
-fm_treehouse_status_holder() {  # <worktree-path>
-  local wt=$1 wt_real="" line rest holder matched field field_real
+# line is split into whitespace-delimited fields with `read -ra` (no word-split or
+# glob expansion of the line) and the worktree path is matched as a whole field,
+# both as given and canonicalized, so a path like .../wt-2 never matches a
+# .../wt-20 line and a symlinked invocation path still lines up with treehouse's
+# physically-resolved output.
+fm_treehouse_status_holder() {  # <worktree-path> <pool-dir>
+  local wt=$1 pool=$2 wt_real="" line rest holder matched field field_real
+  local -a fields=()
+  [ -n "$pool" ] && [ -d "$pool" ] || return 0
   wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || wt_real=""
   while IFS= read -r line; do
     case "$line" in
@@ -50,7 +57,8 @@ fm_treehouse_status_holder() {  # <worktree-path>
       *) continue ;;
     esac
     matched=0
-    for field in $line; do
+    read -ra fields <<< "$line"
+    for field in "${fields[@]}"; do
       if [ "$field" = "$wt" ] || { [ -n "$wt_real" ] && [ "$field" = "$wt_real" ]; }; then
         matched=1
         break
@@ -66,5 +74,5 @@ fm_treehouse_status_holder() {  # <worktree-path>
     holder=${rest%")"}
     printf '%s\n' "$holder"
     return 0
-  done < <(treehouse status 2>/dev/null)
+  done < <( cd "$pool" && treehouse status 2>/dev/null )
 }

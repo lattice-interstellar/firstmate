@@ -464,6 +464,45 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+# Override fakebin/treehouse with a cwd-sensitive mock: `treehouse status` reports
+# the held-by line ONLY when it runs with its working directory at FM_FAKE_TH_POOL
+# (the project pool dir), mirroring real treehouse resolving the pool from the cwd.
+# If the guard fails to cd into the pool before running status, status prints
+# nothing, live_holder is empty, and the foreign-holder refusal never fires - so a
+# test asserting the refusal proves status ran from the pool dir. `treehouse
+# return --force <wt>` records to FM_FAKE_TH_RETURN_LOG as in add_holder_treehouse.
+# Args: case_dir
+add_cwd_sensitive_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    here=$(pwd -P)
+    want=$(cd "${FM_FAKE_TH_POOL:-/nonexistent}" 2>/dev/null && pwd -P) || want=
+    if [ -n "${FM_FAKE_TH_HOLDER:-}" ] && [ -n "${FM_FAKE_TH_WT:-}" ] \
+      && [ -n "$want" ] && [ "$here" = "$want" ]; then
+      printf 'busy  %s  fm/task-x1  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
+    fi
+    exit 0
+    ;;
+  return)
+    shift
+    for a in "$@"; do
+      case "$a" in
+        --force) ;;
+        *) [ -n "${FM_FAKE_TH_RETURN_LOG:-}" ] && printf '%s\n' "$a" >> "$FM_FAKE_TH_RETURN_LOG" ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -1187,10 +1226,41 @@ test_lease_holder_prefix_collision_reads_own_holder() {
   pass "prefix-collision status line reads the queried worktree's own holder (field-bounded match)"
 }
 
+test_lease_holder_guard_reads_status_from_pool_dir() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-pool-cwd)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  # Landed work, so ONLY the foreign lease holder can cause a refusal here.
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_cwd_sensitive_treehouse "$case_dir"
+
+  set +e
+  # The mock reports the foreign holder ONLY when status runs from the project pool
+  # dir. A REFUSED here proves the guard cd'd into the pool before reading status;
+  # if it ran status from teardown's own cwd, live_holder would be empty and the
+  # worktree would be returned instead.
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:/some/other/home:other-task" \
+    FM_FAKE_TH_POOL="$case_dir/project" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lease-holder-pool-cwd: teardown should refuse when status (run from the pool) reports a foreign holder"
+  grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-pool-cwd: no REFUSED line; status was not read from the pool dir"
+  assert_absent "$case_dir/return.log" \
+    "lease-holder-pool-cwd: treehouse return must not be called for a foreign-held worktree"
+  pass "guard reads treehouse status from the project pool dir, not teardown's cwd"
+}
+
 test_local_only_fork_remote_allows
 test_lease_holder_match_allows_return
 test_lease_holder_mismatch_refuses_return
 test_lease_holder_prefix_collision_reads_own_holder
+test_lease_holder_guard_reads_status_from_pool_dir
 test_missing_lease_holder_falls_back_and_returns
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present

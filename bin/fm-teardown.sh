@@ -1034,7 +1034,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # This refusal is intentionally not bypassed by --force: --force discards THIS
   # task's work, never another home's.
   if [ -n "$LEASE_HOLDER" ]; then
-    live_holder=$(fm_treehouse_status_holder "$WT" || true)
+    live_holder=$(fm_treehouse_status_holder "$WT" "$PROJ" || true)
     if [ -n "$live_holder" ] && [ "$live_holder" != "$LEASE_HOLDER" ]; then
       echo "REFUSED: worktree $WT is leased by a different holder; not returning it." >&2
       echo "  recorded lease holder (task $ID): $LEASE_HOLDER" >&2
