@@ -1812,6 +1812,131 @@ EOF
   pass "fm-backlog-handoff creates absent sections and refuses unsafe homes"
 }
 
+# ===========================================================================
+# PR-A2: a secondmate context must carry an explicit FM_HOME. When the executing
+# script's own home carries the secondmate marker but FM_HOME was lost (unset, no
+# FM_*_OVERRIDE), resolution would silently fall back to that home and any state
+# write would leak into it - the demonstrated cross-home meta-leak. fm-spawn.sh
+# and fm-teardown.sh must refuse; and the secondmate launch must export FM_HOME
+# into the pane so a harness that scrubs the launch-command env still inherits it.
+# (data/fmfork-fix-plan-r4 PR-A2; bin/fm-home-lib.sh, docs/fm-home-propagation.md.)
+# ===========================================================================
+
+# Build a fake secondmate home whose OWN bin/ is a copy of the real bin/, so
+# invoking $home/bin/<script> resolves FM_ROOT/FM_HOME to $home and reaches the
+# marker guard exactly as a real secondmate-home invocation would. Echoes $home.
+make_secondmate_home_with_own_bin() {
+  local home=$1
+  mkdir -p "$home/data" "$home/state"
+  cp -R "$ROOT/bin" "$home/bin"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf '%s\n' "$home"
+}
+
+test_secondmate_home_spawn_requires_explicit_fm_home() {
+  local w subhome err
+  w="$TMP_ROOT/marker-gate-spawn"
+  subhome=$(make_secondmate_home_with_own_bin "$w/subhome")
+  err="$w/err.txt"
+
+  # FM_HOME unset and no FM_*_OVERRIDE: the launch environment was lost. The
+  # secondmate home's own bin must refuse rather than write meta into itself.
+  if ( unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
+       "$subhome/bin/fm-spawn.sh" leak-id some-project >/dev/null 2>"$err" ); then
+    fail "fm-spawn ran in a secondmate home with FM_HOME unset (should refuse)"
+  fi
+  grep -F 'without an explicit FM_HOME' "$err" >/dev/null \
+    || fail "spawn refusal did not explain the missing explicit FM_HOME"
+  [ -z "$(ls -A "$subhome/state" 2>/dev/null)" ] \
+    || fail "spawn wrote state into the secondmate home despite refusing"
+  pass "fm-spawn refuses a secondmate home without an explicit FM_HOME"
+}
+
+# Unit-level precision of the guard function itself: it must fire ONLY for a
+# marked own home with FM_HOME lost and no override, and stay inert for every
+# legitimate combination, so the integration refusals above cannot become a false
+# refusal of a real spawn (bin/fm-home-lib.sh).
+test_secondmate_home_guard_precision() {
+  local w marked unmarked
+  w="$TMP_ROOT/guard-precision"
+  marked="$w/marked"
+  unmarked="$w/unmarked"
+  mkdir -p "$marked" "$unmarked"
+  printf 'sm\n' > "$marked/.fm-secondmate-home"
+
+  # Source the guard in a clean env for each case so override state is controlled.
+  guard() {  # <fm-home-was-set> <own-home>
+    ( unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
+      # shellcheck source=bin/fm-home-lib.sh
+      . "$ROOT/bin/fm-home-lib.sh"
+      fm_assert_explicit_secondmate_home "$2" "$1" .fm-secondmate-home 2>/dev/null )
+  }
+
+  # Marked home + FM_HOME lost + no override -> refuse.
+  guard '' "$marked" && fail "guard did not refuse a marked home with FM_HOME lost"
+  # Marked home + explicit FM_HOME -> inert.
+  guard 1 "$marked" || fail "guard refused a marked home that had an explicit FM_HOME"
+  # Unmarked (primary) home + FM_HOME lost -> inert.
+  guard '' "$unmarked" || fail "guard refused a primary home with FM_HOME unset"
+  # Marked home + FM_HOME lost but an override in play (test harness) -> inert.
+  ( FM_STATE_OVERRIDE="$w/override"
+    # shellcheck source=bin/fm-home-lib.sh
+    . "$ROOT/bin/fm-home-lib.sh"
+    fm_assert_explicit_secondmate_home "$marked" '' .fm-secondmate-home 2>/dev/null ) \
+    || fail "guard refused despite an FM_*_OVERRIDE being in play"
+  pass "secondmate-home guard fires only on a marked home with a lost FM_HOME"
+}
+
+test_secondmate_home_teardown_requires_explicit_fm_home() {
+  local w subhome err
+  w="$TMP_ROOT/marker-gate-teardown"
+  subhome=$(make_secondmate_home_with_own_bin "$w/subhome")
+  err="$w/err.txt"
+
+  if ( unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
+       "$subhome/bin/fm-teardown.sh" leak-id >/dev/null 2>"$err" ); then
+    fail "fm-teardown ran in a secondmate home with FM_HOME unset (should refuse)"
+  fi
+  grep -F 'without an explicit FM_HOME' "$err" >/dev/null \
+    || fail "teardown refusal did not explain the missing explicit FM_HOME"
+  pass "fm-teardown refuses a secondmate home without an explicit FM_HOME"
+}
+
+test_secondmate_launch_exports_fm_home() {
+  local w sm home fakebin log meta exported home_meta
+  w="$TMP_ROOT/launch-export"
+  sm="$w/sm"
+  home="$w/home"
+  mkdir -p "$home/state" "$home/data"
+  # A genuine seeded secondmate home for a legitimate, successful launch.
+  mkdir -p "$sm/bin" "$sm/data"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf 'sm\n' > "$sm/.fm-secondmate-home"
+  printf 'charter\n' > "$sm/data/charter.md"
+  fakebin=$(make_fake_tmux "$w/fake")
+  log="$w/fake/tmux.log"
+
+  PATH="$fakebin:$PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$w/fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>&1 \
+    || fail "legitimate secondmate spawn (explicit FM_HOME) failed"
+
+  meta="$home/state/sm.meta"
+  [ -f "$meta" ] || fail "legitimate secondmate spawn wrote no meta"
+  # The pane shell must be sent an `export FM_HOME=<home>` line before launch, and
+  # it must name the resolved home recorded in meta.
+  exported=$(grep -o "export FM_HOME='[^']*'" "$log" | tail -1)
+  home_meta=$(grep '^home=' "$meta" | tail -1 | cut -d= -f2-)
+  [ -n "$exported" ] || fail "secondmate launch did not export FM_HOME into the pane"
+  [ "$exported" = "export FM_HOME='$home_meta'" ] \
+    || fail "pane FM_HOME export ('$exported') did not match meta home= ('$home_meta')"
+  pass "secondmate launch exports FM_HOME into the pane and a legitimate spawn succeeds"
+}
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -1862,3 +1987,7 @@ test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely
 test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home
+test_secondmate_home_spawn_requires_explicit_fm_home
+test_secondmate_home_guard_precision
+test_secondmate_home_teardown_requires_explicit_fm_home
+test_secondmate_launch_exports_fm_home

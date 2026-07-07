@@ -78,6 +78,13 @@
 # the installed treehouse lacks --lease (bootstrap flags that as an upgrade), the
 # spawn falls back to the bare `treehouse get` + pane-cwd poll and records no
 # lease_holder=.
+# If this script's own home carries the secondmate marker but FM_HOME was lost
+# (unset, no FM_*_OVERRIDE), the launch environment was dropped and every
+# home-derived write would silently leak into this home; the spawn refuses instead
+# (bin/fm-home-lib.sh; data/fmfork-fix-plan-r4 PR-A2). A --secondmate launch also
+# exports FM_HOME into the pane shell (belt to the FM_HOME=... command prefix), so
+# a harness that scrubs the launch-command env still inherits it in the agent's
+# Bash-tool subshells (verified for claude; docs/fm-home-propagation.md).
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -88,6 +95,10 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# Capture whether FM_HOME was explicitly provided before it is defaulted below,
+# so the secondmate-home guard can tell an inherited explicit home from a lost
+# launch environment (bin/fm-home-lib.sh; data/fmfork-fix-plan-r4 PR-A2).
+FM_HOME_WAS_SET=; [ -n "${FM_HOME:-}" ] && FM_HOME_WAS_SET=1
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -110,6 +121,11 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-treehouse-lib.sh
 . "$SCRIPT_DIR/fm-treehouse-lib.sh"
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
+# Refuse a secondmate-marked home entered without an explicit FM_HOME before any
+# arg parsing, side effect, or state write (data/fmfork-fix-plan-r4 PR-A2).
+fm_assert_explicit_secondmate_home "$FM_ROOT" "$FM_HOME_WAS_SET" "$SUB_HOME_MARKER" || exit 1
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -1101,6 +1117,17 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+fi
+# Belt-and-suspenders FM_HOME propagation for a secondmate launch: besides the
+# FM_HOME=... command prefix above, export FM_HOME into the pane shell before the
+# agent starts, exactly like GOTMPDIR below. A harness that scrubs the launch
+# command's env still yields FM_HOME in the agent's own shell and its Bash-tool
+# subshells. Verified against claude: a pane-exported var survives into tool
+# subshells (docs/fm-home-propagation.md); shipped unconditionally for every
+# secondmate harness until each is checked (data/fmfork-fix-plan-r4 PR-A2).
+if [ "$KIND" = secondmate ]; then
+  spawn_send_text_line "$T" "export FM_HOME=$sq_home"
+  sleep 0.3
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so

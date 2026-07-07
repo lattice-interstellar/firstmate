@@ -58,6 +58,9 @@ make_fake_root() {
   # fm-treehouse-lib.sh: symlink the REAL file (teardown sources it for the
   # cross-home lease-holder guard; unchanged by this fixture).
   ln -s "$ROOT/bin/fm-treehouse-lib.sh" "$fake/bin/fm-treehouse-lib.sh"
+  # fm-home-lib.sh: symlink the REAL file (teardown sources it for the
+  # secondmate-home explicit-FM_HOME assertion; unchanged by this fixture).
+  ln -s "$ROOT/bin/fm-home-lib.sh" "$fake/bin/fm-home-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -154,6 +157,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   ln -s "$ROOT/bin/fm-treehouse-lib.sh" "$fake/bin/fm-treehouse-lib.sh"
+  ln -s "$ROOT/bin/fm-home-lib.sh" "$fake/bin/fm-home-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
