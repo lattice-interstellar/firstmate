@@ -68,6 +68,11 @@ cmux's container shape is one workspace per task with one surface, no per-home c
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
+A treehouse pool is keyed by the origin remote URL, so two firstmate homes cloning a same-origin repo share one pool, and a non-leased `treehouse get` could hand the same idle worktree to both.
+`fm-spawn.sh` therefore acquires a crew/scout worktree with `treehouse get --lease --lease-holder fm:<abs-home>:<id>`, which durably reserves the worktree and records the owner token as `lease_holder=` in the task meta; `fm-teardown.sh` reads the worktree's live holder from `treehouse status` and refuses to return it when a different home holds it, so one home's teardown never resets a worktree another home is live in.
+The shared parse lives in `fm-treehouse-lib.sh`.
+A treehouse without `--lease` (bootstrap flags that as an upgrade) falls back to a bare `treehouse get` with pane-cwd polling and records no `lease_holder=`, which teardown treats as an unknown holder and handles with its pre-lease behavior.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
