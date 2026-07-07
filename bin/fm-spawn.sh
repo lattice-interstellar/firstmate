@@ -183,6 +183,14 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+# Lease-abort state: once a crew/scout worktree is leased (treehouse get --lease)
+# but before its meta is written, an abnormal exit under set -eu would strand the
+# lease forever (a leased worktree is never re-handed or pruned until returned).
+# The EXIT trap returns it while this flag is set; it is cleared the moment meta is
+# written, so a normal completion or any post-meta failure leaves the lease held.
+LEASE_ABORT_CLEANUP=0
+LEASE_ABORT_WT=
+LEASE_ABORT_POOL=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -201,8 +209,16 @@ parse_orca_worktree_result() {
   fi
 }
 
-orca_spawn_abort_cleanup() {
+spawn_abort_cleanup() {
   local status=$?
+  # Return a crew/scout lease acquired before meta was written, so an abnormal
+  # spawn exit never strands a leased pool worktree. Best-effort and non-fatal.
+  if [ "${LEASE_ABORT_CLEANUP:-0}" = 1 ]; then
+    LEASE_ABORT_CLEANUP=0
+    if [ -n "${LEASE_ABORT_WT:-}" ]; then
+      ( cd "${LEASE_ABORT_POOL:-.}" 2>/dev/null && treehouse return --force "$LEASE_ABORT_WT" >/dev/null 2>&1 ) || true
+    fi
+  fi
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -232,7 +248,7 @@ orca_spawn_abort_cleanup() {
   fi
   return "$status"
 }
-trap orca_spawn_abort_cleanup EXIT
+trap spawn_abort_cleanup EXIT
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -831,10 +847,34 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: treehouse get --lease did not report a worktree path for $ID" >&2
       exit 1
     fi
+    # Arm lease return-on-abnormal-exit now that the lease is held but no meta
+    # exists yet; cleared once meta is written (below). Without this, any failure
+    # in the ~160 lines to the meta write leaks the lease permanently.
+    LEASE_ABORT_CLEANUP=1
+    LEASE_ABORT_WT=$WT
+    LEASE_ABORT_POOL=$PROJ_ABS
     validate_spawn_worktree "treehouse get --lease" "$T"
     # The lease was acquired out-of-pane, so move the pane into the worktree the
-    # agent will work in (the bare-get fallback below relies on treehouse's own cd).
+    # agent will work in, then verify the pane physically arrived: the cd is sent
+    # as keystrokes into a fresh window, so poll spawn_current_path until it equals
+    # $WT (absorbing shell-startup races) rather than firing and forgetting. If the
+    # cd is dropped or races the prompt, the agent would otherwise launch in the
+    # shared project clone - the exact worktree tangle this repo guards against.
     spawn_send_text_line "$T" "cd $(shell_quote "$WT")"
+    WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || WT_REAL=$WT
+    lease_pane_moved=0
+    for _ in $(seq 1 60); do
+      p=$(spawn_current_path "$T" || true)
+      if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$WT_REAL" ]; then
+        lease_pane_moved=1
+        break
+      fi
+      sleep 1
+    done
+    if [ "$lease_pane_moved" != 1 ]; then
+      echo "error: pane $T did not enter leased worktree $WT within 60s; inspect the window" >&2
+      exit 1
+    fi
   else
     # Fallback for a treehouse without --lease (bootstrap flags a missing --lease
     # as an upgrade). Run the bare get in the pane and poll the pane cwd, exactly
@@ -1036,6 +1076,9 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# Meta now records worktree= and lease_holder=, so teardown can find and return
+# the lease; disarm the spawn-abort lease return.
+LEASE_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

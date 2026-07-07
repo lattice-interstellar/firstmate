@@ -405,12 +405,15 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
-# Override fakebin/treehouse with a lease-holder-aware mock for the cross-home
-# guard tests. `treehouse status` reports the worktree at FM_FAKE_TH_WT as held by
-# FM_FAKE_TH_HOLDER (both env-driven per test), matching treehouse's real
-# "... (held by <holder>)" line ending; `treehouse return --force <wt>` records the
-# returned path to FM_FAKE_TH_RETURN_LOG so a test can assert whether the return
-# ran. Args: case_dir
+# All the cross-home guard mocks below emit the REAL treehouse v2.0.0 status row
+# shape - `<index>  <state>  <path>  (held by <holder>)` for a leased worktree (an
+# unheld row omits the `  (held by ...)` suffix) - verified against the installed
+# treehouse. Emitting the real shape is deliberate: the earlier mocks put the path
+# in a different column, which is exactly how a fail-open parse bug slipped past a
+# full-green suite. `treehouse return --force <wt>` records the returned path to
+# FM_FAKE_TH_RETURN_LOG so a test can assert whether the return actually ran.
+
+# Leased row for FM_FAKE_TH_WT held by FM_FAKE_TH_HOLDER (both env-driven per test).
 add_holder_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
@@ -419,7 +422,7 @@ set -u
 case "${1:-}" in
   status)
     if [ -n "${FM_FAKE_TH_HOLDER:-}" ] && [ -n "${FM_FAKE_TH_WT:-}" ]; then
-      printf 'busy  %s  fm/task-x1  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
+      printf '1     leased       %s  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
     fi
     exit 0
     ;;
@@ -439,13 +442,9 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
-# Override fakebin/treehouse to reproduce the path-prefix collision: `treehouse
-# status` reports two worktrees whose paths are prefixes of one another - a
-# foreign-held "<wt>-2" line FIRST, then the queried worktree's own line held by
-# FM_FAKE_TH_HOLDER. A substring-matching holder parse would read the foreign
-# "<wt>-2" holder for a "<wt>" query and falsely refuse; a field-bounded parse
-# reads the own holder. `treehouse return --force <wt>` records to
-# FM_FAKE_TH_RETURN_LOG as in add_holder_treehouse. Args: case_dir
+# Path-prefix collision: a foreign-held "<wt>-2" row FIRST, then this task's own
+# "<wt>" row. A substring-matching parse would read the foreign "<wt>-2" holder for
+# a "<wt>" query and falsely refuse; a field-bounded parse reads the own holder.
 add_collision_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
@@ -454,8 +453,8 @@ set -u
 case "${1:-}" in
   status)
     if [ -n "${FM_FAKE_TH_HOLDER:-}" ] && [ -n "${FM_FAKE_TH_WT:-}" ]; then
-      printf 'busy  %s-2  fm/task-y2  (held by %s)\n' "$FM_FAKE_TH_WT" "fm:/some/other/home:other-task"
-      printf 'busy  %s  fm/task-x1  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
+      printf '1     leased       %s-2  (held by %s)\n' "$FM_FAKE_TH_WT" "fm:/some/other/home:other-task"
+      printf '2     leased       %s  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
     fi
     exit 0
     ;;
@@ -475,14 +474,12 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
-# Override fakebin/treehouse with a cwd-sensitive mock: `treehouse status` reports
-# the held-by line ONLY when it runs with its working directory at FM_FAKE_TH_POOL
-# (the project pool dir), mirroring real treehouse resolving the pool from the cwd.
-# If the guard fails to cd into the pool before running status, status prints
-# nothing, live_holder is empty, and the foreign-holder refusal never fires - so a
-# test asserting the refusal proves status ran from the pool dir. `treehouse
-# return --force <wt>` records to FM_FAKE_TH_RETURN_LOG as in add_holder_treehouse.
-# Args: case_dir
+# cwd-sensitive: emits the worktree's OWN-holder row ONLY when status runs with its
+# working directory at FM_FAKE_TH_POOL (the project pool dir), mirroring real
+# treehouse resolving the pool from the cwd. If the guard fails to cd into the pool,
+# status prints nothing, the state is "notfound", and the fail-closed guard REFUSES.
+# So a test asserting the return SUCCEEDED (own holder matched) proves status ran
+# from the pool dir; a guard that skipped the cd would have refused instead.
 add_cwd_sensitive_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
@@ -494,7 +491,7 @@ case "${1:-}" in
     want=$(cd "${FM_FAKE_TH_POOL:-/nonexistent}" 2>/dev/null && pwd -P) || want=
     if [ -n "${FM_FAKE_TH_HOLDER:-}" ] && [ -n "${FM_FAKE_TH_WT:-}" ] \
       && [ -n "$want" ] && [ "$here" = "$want" ]; then
-      printf 'busy  %s  fm/task-x1  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
+      printf '1     leased       %s  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
     fi
     exit 0
     ;;
@@ -514,12 +511,9 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
-# Override fakebin/treehouse with a mock that emits the worktree path in the
-# tilde-abbreviated form real treehouse v2.0.0 status uses (`~/<subpath>`), while
-# the recorded meta worktree= and the queried path stay the full "$HOME/<subpath>"
-# form. A guard that does not expand the leading ~ never matches and silently
-# no-ops. `treehouse return --force <wt>` records to FM_FAKE_TH_RETURN_LOG as in
-# add_holder_treehouse. Args: case_dir
+# Emits the worktree path tilde-abbreviated (`~/<subpath>`) as real treehouse does,
+# while meta worktree= stays the full "$HOME/<subpath>" form. A guard that does not
+# expand the leading ~ never matches and (fail-closed) refuses even our own worktree.
 add_tilde_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
@@ -532,8 +526,66 @@ case "${1:-}" in
       case "$wt" in
         "$HOME"/*) wt="~/${wt#"$HOME"/}" ;;
       esac
-      printf 'busy  %s  fm/task-x1  (held by %s)\n' "$wt" "$FM_FAKE_TH_HOLDER"
+      printf '1     leased       %s  (held by %s)\n' "$wt" "$FM_FAKE_TH_HOLDER"
     fi
+    exit 0
+    ;;
+  return)
+    shift
+    for a in "$@"; do
+      case "$a" in
+        --force) ;;
+        *) [ -n "${FM_FAKE_TH_RETURN_LOG:-}" ] && printf '%s\n' "$a" >> "$FM_FAKE_TH_RETURN_LOG" ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# `treehouse status` exits non-zero (pool read failure). The fail-closed guard must
+# REFUSE rather than treat an unreadable status as "unheld -> proceed".
+add_status_error_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    echo "treehouse: status failed" >&2
+    exit 1
+    ;;
+  return)
+    shift
+    for a in "$@"; do
+      case "$a" in
+        --force) ;;
+        *) [ -n "${FM_FAKE_TH_RETURN_LOG:-}" ] && printf '%s\n' "$a" >> "$FM_FAKE_TH_RETURN_LOG" ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# `treehouse status` lists OTHER worktrees but not FM_FAKE_TH_WT (the row is
+# missing). The fail-closed guard must REFUSE: an unfound row is not a licence to
+# return --force. `treehouse status` still exits 0 (clean listing, just not ours).
+add_missing_row_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    printf '1     leased       %s  (held by %s)\n' "/some/other/pool/wt-a" "fm:/other/home:a"
+    printf '2     in-use       %s\n' "/some/other/pool/wt-b"
     exit 0
     ;;
   return)
@@ -1280,28 +1332,27 @@ test_lease_holder_guard_reads_status_from_pool_dir() {
   case_dir=$(make_case lease-holder-pool-cwd)
   write_meta "$case_dir" no-mistakes ship
   printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
-  # Landed work, so ONLY the foreign lease holder can cause a refusal here.
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
   add_cwd_sensitive_treehouse "$case_dir"
 
   set +e
-  # The mock reports the foreign holder ONLY when status runs from the project pool
-  # dir. A REFUSED here proves the guard cd'd into the pool before reading status;
-  # if it ran status from teardown's own cwd, live_holder would be empty and the
-  # worktree would be returned instead.
-  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:/some/other/home:other-task" \
+  # The mock reports this task's OWN-holder row ONLY when status runs from the
+  # project pool dir. A SUCCESSFUL return proves the guard cd'd into the pool before
+  # reading status; if it ran status from teardown's own cwd, status would be empty,
+  # the fail-closed guard would see "notfound", and it would REFUSE instead.
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:$case_dir:task-x1" \
     FM_FAKE_TH_POOL="$case_dir/project" \
     FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "lease-holder-pool-cwd: teardown should refuse when status (run from the pool) reports a foreign holder"
-  grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-pool-cwd: no REFUSED line; status was not read from the pool dir"
-  assert_absent "$case_dir/return.log" \
-    "lease-holder-pool-cwd: treehouse return must not be called for a foreign-held worktree"
+  expect_code 0 "$rc" "lease-holder-pool-cwd: teardown should return when status (run from the pool) reports the own holder"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-pool-cwd: refused; status was not read from the pool dir (fail-closed on empty status)"
+  assert_grep "$case_dir/wt" "$case_dir/return.log" \
+    "lease-holder-pool-cwd: treehouse return was not called; status was not read from the pool dir"
   pass "guard reads treehouse status from the project pool dir, not teardown's cwd"
 }
 
@@ -1358,6 +1409,151 @@ test_lease_holder_tilde_status_mismatch_refuses_return() {
   pass "tilde-abbreviated status path still refuses a foreign holder (guard not a no-op)"
 }
 
+test_lease_holder_mismatch_force_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-mismatch-force)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  # Unpushed work: --force would normally skip the landed-work check, so the ONLY
+  # thing that can refuse here is the cross-home guard - which must NOT be bypassed
+  # by --force (--force discards THIS task's work, never another home's).
+  wt_commit "$case_dir" "unpushed work"
+  add_holder_treehouse "$case_dir"
+
+  set +e
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:/some/other/home:other-task" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lease-holder-mismatch-force: guard must refuse a foreign-held worktree even under --force"
+  grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-mismatch-force: no REFUSED line under --force"
+  grep -q "leased by a different holder" "$case_dir/stderr" \
+    || fail "lease-holder-mismatch-force: refusal did not name the holder mismatch"
+  assert_absent "$case_dir/return.log" \
+    "lease-holder-mismatch-force: treehouse return must not be called for a foreign-held worktree, even with --force"
+  pass "cross-home guard is not bypassed by --force (foreign holder still refuses)"
+}
+
+test_lease_holder_status_error_fails_closed() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-status-error)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  # Landed work, so the ONLY thing that can refuse is the guard failing closed on a
+  # `treehouse status` error - not the landed-work check.
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_status_error_treehouse "$case_dir"
+
+  set +e
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:$case_dir:task-x1" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lease-holder-status-error: teardown must fail closed when treehouse status errors"
+  grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-status-error: no REFUSED line on a status error"
+  grep -q "cannot confirm" "$case_dir/stderr" || fail "lease-holder-status-error: refusal did not cite an unconfirmed lease state"
+  assert_absent "$case_dir/return.log" \
+    "lease-holder-status-error: treehouse return must not be called when status could not be read"
+  pass "treehouse status error fails closed (refuse, no return) rather than silently no-op"
+}
+
+test_lease_holder_missing_row_fails_closed() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-missing-row)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  # Landed work, so the ONLY thing that can refuse is the guard failing closed on a
+  # status listing that does not contain this worktree's row.
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_missing_row_treehouse "$case_dir"
+
+  set +e
+  FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lease-holder-missing-row: teardown must fail closed when its worktree row is absent from status"
+  grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-missing-row: no REFUSED line for a missing row"
+  grep -q "cannot confirm" "$case_dir/stderr" || fail "lease-holder-missing-row: refusal did not cite an unconfirmed lease state"
+  assert_absent "$case_dir/return.log" \
+    "lease-holder-missing-row: treehouse return must not be called when the worktree row is not found"
+  pass "a worktree row absent from treehouse status fails closed (refuse, no return)"
+}
+
+# Build a task worktree whose path contains a space (the exact $HOME/project-with-a-
+# space case that made the pre-fix parse return empty and no-op). Repoints the meta
+# at the spaced worktree and lands its branch so only the guard can refuse.
+# Args: case_dir  ->  echoes the spaced worktree path
+add_spaced_worktree() {
+  local case_dir=$1 wt="$1/wt with space"
+  git -C "$case_dir/project" worktree add -q -b fm/task-sp "$wt" main
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "spaced work"
+  git -C "$wt" push -q origin fm/task-sp
+  git -C "$case_dir/project" fetch -q origin
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "lease_holder=fm:$case_dir:task-x1"
+  printf '%s\n' "$wt"
+}
+
+test_lease_holder_spaces_in_path_mismatch_refuses() {
+  local case_dir rc wt
+  case_dir=$(make_case lease-holder-spaces-mismatch)
+  wt=$(add_spaced_worktree "$case_dir")
+  add_holder_treehouse "$case_dir"
+
+  set +e
+  # A foreign holder on a space-containing worktree path must still REFUSE - the
+  # pre-fix parse split the path across fields, matched nothing, and no-op'd the
+  # guard in front of `return --force`, releasing the other home's live worktree.
+  FM_FAKE_TH_WT="$wt" FM_FAKE_TH_HOLDER="fm:/some/other/home:other-task" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lease-holder-spaces-mismatch: a foreign holder on a spaced worktree path must refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-spaces-mismatch: no REFUSED line for a spaced path"
+  grep -q "leased by a different holder" "$case_dir/stderr" \
+    || fail "lease-holder-spaces-mismatch: refusal did not name the holder mismatch"
+  assert_absent "$case_dir/return.log" \
+    "lease-holder-spaces-mismatch: treehouse return must not run for a foreign-held spaced worktree"
+  pass "space-containing worktree path still refuses a foreign holder (parse handles spaces, no silent no-op)"
+}
+
+test_lease_holder_spaces_in_path_match_returns() {
+  local case_dir rc wt
+  case_dir=$(make_case lease-holder-spaces-match)
+  wt=$(add_spaced_worktree "$case_dir")
+  add_holder_treehouse "$case_dir"
+
+  set +e
+  FM_FAKE_TH_WT="$wt" FM_FAKE_TH_HOLDER="fm:$case_dir:task-x1" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "lease-holder-spaces-match: own holder on a spaced worktree path should return"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-spaces-match: falsely refused a matching-holder spaced worktree"
+  assert_grep "$wt" "$case_dir/return.log" \
+    "lease-holder-spaces-match: treehouse return was not called for the spaced worktree"
+  pass "space-containing worktree path with a matching holder returns (parse handles spaces both ways)"
+}
+
 test_local_only_fork_remote_allows
 test_lease_holder_match_allows_return
 test_lease_holder_mismatch_refuses_return
@@ -1365,6 +1561,11 @@ test_lease_holder_prefix_collision_reads_own_holder
 test_lease_holder_guard_reads_status_from_pool_dir
 test_lease_holder_tilde_status_match_allows_return
 test_lease_holder_tilde_status_mismatch_refuses_return
+test_lease_holder_mismatch_force_still_refuses
+test_lease_holder_status_error_fails_closed
+test_lease_holder_missing_row_fails_closed
+test_lease_holder_spaces_in_path_mismatch_refuses
+test_lease_holder_spaces_in_path_match_returns
 test_missing_lease_holder_falls_back_and_returns
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
