@@ -76,10 +76,18 @@
 # the three checks, is treated as NOT provably stale (fail safe): the lock is left
 # untouched and the original failure is surfaced, exactly as before this fix. Teardown
 # output notes every wait, retry, and removal so the captain can see what happened.
+# If this script's own home carries the secondmate marker but FM_HOME was lost
+# (unset, no FM_*_OVERRIDE), the launch environment was dropped and every
+# home-derived read/write would silently target this home; teardown refuses
+# instead (bin/fm-home-lib.sh; data/fmfork-fix-plan-r4 PR-A2).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# Capture whether FM_HOME was explicitly provided before it is defaulted below,
+# so the secondmate-home guard can tell an inherited explicit home from a lost
+# launch environment (bin/fm-home-lib.sh; data/fmfork-fix-plan-r4 PR-A2).
+FM_HOME_WAS_SET=; [ -n "${FM_HOME:-}" ] && FM_HOME_WAS_SET=1
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -102,6 +110,11 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-treehouse-lib.sh
 . "$SCRIPT_DIR/fm-treehouse-lib.sh"
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
+# Refuse a secondmate-marked home entered without an explicit FM_HOME before any
+# side effect or state read/write (data/fmfork-fix-plan-r4 PR-A2).
+fm_assert_explicit_secondmate_home "$FM_ROOT" "$FM_HOME_WAS_SET" "$SUB_HOME_MARKER" || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
