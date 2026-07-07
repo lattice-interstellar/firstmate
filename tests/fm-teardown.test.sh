@@ -55,6 +55,17 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+# A second root under $HOME so a case's worktree path can be tilde-abbreviated the
+# way real `treehouse status` reports it. fm_test_tmproot's EXIT trap is set in its
+# own command-substitution subshell and never reaches this parent shell, so remove
+# HOME_ROOT from an explicit trap of our own; ending on a clean status keeps the
+# script's exit code driven by the tests, not the trap.
+HOME_ROOT=$(mktemp -d "$HOME/.fm-teardown-tests.XXXXXX")
+teardown_test_cleanup() {
+  rm -rf "${HOME_ROOT:-}" 2>/dev/null
+  return 0
+}
+trap teardown_test_cleanup EXIT
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 
@@ -66,8 +77,8 @@ export REAL_GIT_FOR_TEST
 #   $CASE/wt/           - a worktree of the project (the task worktree)
 # Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
-  case_dir="$TMP_ROOT/$name"
+  local name=$1 root=${2:-$TMP_ROOT} case_dir fakebin
+  case_dir="$root/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
 
@@ -484,6 +495,44 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_TH_HOLDER:-}" ] && [ -n "${FM_FAKE_TH_WT:-}" ] \
       && [ -n "$want" ] && [ "$here" = "$want" ]; then
       printf 'busy  %s  fm/task-x1  (held by %s)\n' "$FM_FAKE_TH_WT" "$FM_FAKE_TH_HOLDER"
+    fi
+    exit 0
+    ;;
+  return)
+    shift
+    for a in "$@"; do
+      case "$a" in
+        --force) ;;
+        *) [ -n "${FM_FAKE_TH_RETURN_LOG:-}" ] && printf '%s\n' "$a" >> "$FM_FAKE_TH_RETURN_LOG" ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# Override fakebin/treehouse with a mock that emits the worktree path in the
+# tilde-abbreviated form real treehouse v2.0.0 status uses (`~/<subpath>`), while
+# the recorded meta worktree= and the queried path stay the full "$HOME/<subpath>"
+# form. A guard that does not expand the leading ~ never matches and silently
+# no-ops. `treehouse return --force <wt>` records to FM_FAKE_TH_RETURN_LOG as in
+# add_holder_treehouse. Args: case_dir
+add_tilde_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    if [ -n "${FM_FAKE_TH_HOLDER:-}" ] && [ -n "${FM_FAKE_TH_WT:-}" ]; then
+      wt=$FM_FAKE_TH_WT
+      case "$wt" in
+        "$HOME"/*) wt="~/${wt#"$HOME"/}" ;;
+      esac
+      printf 'busy  %s  fm/task-x1  (held by %s)\n' "$wt" "$FM_FAKE_TH_HOLDER"
     fi
     exit 0
     ;;
@@ -1256,11 +1305,66 @@ test_lease_holder_guard_reads_status_from_pool_dir() {
   pass "guard reads treehouse status from the project pool dir, not teardown's cwd"
 }
 
+test_lease_holder_tilde_status_match_allows_return() {
+  local case_dir rc
+  # Case under $HOME so the worktree path can be tilde-abbreviated by the mock.
+  case_dir=$(make_case lease-holder-tilde-match "$HOME_ROOT")
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_tilde_treehouse "$case_dir"
+
+  set +e
+  # status emits the worktree as ~/<subpath>; meta worktree= is the full $HOME path.
+  # The guard must expand the leading ~ to match and read its own holder.
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:$case_dir:task-x1" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "lease-holder-tilde-match: teardown should return when the tilde-abbreviated status holder matches"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-tilde-match: teardown falsely refused on a tilde-abbreviated status line"
+  assert_grep "$case_dir/wt" "$case_dir/return.log" \
+    "lease-holder-tilde-match: treehouse return was not called for the worktree"
+  pass "tilde-abbreviated status path matches the full meta path and reads the own holder"
+}
+
+test_lease_holder_tilde_status_mismatch_refuses_return() {
+  local case_dir rc
+  case_dir=$(make_case lease-holder-tilde-mismatch "$HOME_ROOT")
+  write_meta "$case_dir" no-mistakes ship
+  printf 'lease_holder=fm:%s:task-x1\n' "$case_dir" >> "$case_dir/state/task-x1.meta"
+  # Landed work, so ONLY the foreign lease holder can cause a refusal here.
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_tilde_treehouse "$case_dir"
+
+  set +e
+  # A tilde-abbreviated status line must still be read so a foreign holder refuses.
+  FM_FAKE_TH_WT="$case_dir/wt" FM_FAKE_TH_HOLDER="fm:/some/other/home:other-task" \
+    FM_FAKE_TH_RETURN_LOG="$case_dir/return.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lease-holder-tilde-mismatch: teardown should refuse a foreign-held worktree read from a tilde-abbreviated status line"
+  grep -q REFUSED "$case_dir/stderr" || fail "lease-holder-tilde-mismatch: no REFUSED line; tilde status holder was not read"
+  assert_absent "$case_dir/return.log" \
+    "lease-holder-tilde-mismatch: treehouse return must not be called for a foreign-held worktree"
+  pass "tilde-abbreviated status path still refuses a foreign holder (guard not a no-op)"
+}
+
 test_local_only_fork_remote_allows
 test_lease_holder_match_allows_return
 test_lease_holder_mismatch_refuses_return
 test_lease_holder_prefix_collision_reads_own_holder
 test_lease_holder_guard_reads_status_from_pool_dir
+test_lease_holder_tilde_status_match_allows_return
+test_lease_holder_tilde_status_mismatch_refuses_return
 test_missing_lease_holder_falls_back_and_returns
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present

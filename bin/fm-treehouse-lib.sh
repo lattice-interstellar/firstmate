@@ -45,7 +45,11 @@ fm_treehouse_owner_token() {  # <home> <id>
 # glob expansion of the line) and the worktree path is matched as a whole field,
 # both as given and canonicalized, so a path like .../wt-2 never matches a
 # .../wt-20 line and a symlinked invocation path still lines up with treehouse's
-# physically-resolved output.
+# physically-resolved output. treehouse prints the worktree path tilde-abbreviated
+# (e.g. `~/.treehouse/...`) while the target path from meta is the full absolute
+# path, so a leading `~`/`~/` in each field is expanded to $HOME (via parameter
+# expansion, never eval) before comparison; without that the guard never matches
+# and silently no-ops.
 fm_treehouse_status_holder() {  # <worktree-path> <pool-dir>
   local wt=$1 pool=$2 wt_real="" line rest holder matched field field_real
   local -a fields=()
@@ -59,6 +63,11 @@ fm_treehouse_status_holder() {  # <worktree-path> <pool-dir>
     matched=0
     read -ra fields <<< "$line"
     for field in "${fields[@]}"; do
+      if [ "$field" = '~' ]; then
+        field=$HOME
+      elif [ "${field#\~/}" != "$field" ]; then
+        field="$HOME/${field#\~/}"
+      fi
       if [ "$field" = "$wt" ] || { [ -n "$wt_real" ] && [ "$field" = "$wt_real" ]; }; then
         matched=1
         break
